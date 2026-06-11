@@ -1,3 +1,4 @@
+use rmux_core::input::mode;
 use rmux_core::{GridRenderOptions, OptionStore, Pane, Screen, ScreenCaptureRange, Session};
 
 use super::{
@@ -74,18 +75,27 @@ impl PaneRenderSnapshot {
             })
             .collect::<Vec<_>>();
 
-        let (cursor_x, cursor_y) = screen.cursor_position();
-        let cursor = cursor_position_bytes(
-            pane_geometry
-                .y()
-                .saturating_add(geometry.content_y_offset)
-                .saturating_add(
-                    cursor_y.min(u32::from(pane_geometry.rows().saturating_sub(1))) as u16,
+        // Mirrors render_pane_cursor: the cursor bytes must carry visibility, not just
+        // position — a position-only field leaves a hidden pane cursor visible on the
+        // client, parked wherever ESC[u restores to.
+        let cursor = if screen.mode() & mode::MODE_CURSOR == 0 {
+            b"\x1b[?25l".to_vec()
+        } else {
+            let (cursor_x, cursor_y) = screen.cursor_position();
+            let mut cursor = cursor_position_bytes(
+                pane_geometry
+                    .y()
+                    .saturating_add(geometry.content_y_offset)
+                    .saturating_add(
+                        cursor_y.min(u32::from(pane_geometry.rows().saturating_sub(1))) as u16,
+                    ),
+                pane_geometry.x().saturating_add(
+                    cursor_x.min(u32::from(pane_geometry.cols().saturating_sub(1))) as u16,
                 ),
-            pane_geometry.x().saturating_add(
-                cursor_x.min(u32::from(pane_geometry.cols().saturating_sub(1))) as u16,
-            ),
-        );
+            );
+            cursor.extend_from_slice(b"\x1b[?25h");
+            cursor
+        };
 
         Some(Self {
             x: pane_geometry.x(),
@@ -136,7 +146,10 @@ impl PaneRenderSnapshot {
         if !frame.is_empty() {
             frame.extend_from_slice(b"\x1b[0m\x1b[u");
         }
-        if self.cursor != next.cursor {
+        // Emitting the cursor bytes only on change is not enough: any non-empty frame
+        // ends with ESC[u, which moves the physical cursor, so visibility and position
+        // must be re-asserted even when logically unchanged since the last frame.
+        if self.cursor != next.cursor || !frame.is_empty() {
             frame.extend_from_slice(&next.cursor);
         }
 
@@ -190,7 +203,7 @@ mod tests {
         assert!(text.contains("abcd"));
         assert!(!text.contains("\u{1b}[2;1H"));
         assert!(!text.contains("\u{1b}[4;1H"));
-        assert!(text.ends_with("\u{1b}[1;5H"));
+        assert!(text.ends_with("\u{1b}[1;5H\u{1b}[?25h"));
     }
 
     #[test]
@@ -234,7 +247,126 @@ mod tests {
 
         assert!(text.contains("\u{1b}[2;1H"));
         assert!(text.contains("def"));
-        assert!(text.ends_with("\u{1b}[2;4H"));
+        assert!(text.ends_with("\u{1b}[2;4H\u{1b}[?25h"));
+    }
+
+    #[test]
+    fn pane_delta_hidden_cursor_busy_frame_ends_with_hide() {
+        let session = Session::new(session_name("alpha"), TerminalSize { cols: 10, rows: 4 });
+        let pane = session.window().active_pane().expect("active pane");
+        let options = OptionStore::new();
+        let before = screen_with(b"\x1b[?25labc");
+        let after = screen_with(b"\x1b[?25labcd");
+        let before = PaneRenderSnapshot::capture(&session, &options, pane, &before)
+            .expect("before snapshot");
+        let after =
+            PaneRenderSnapshot::capture(&session, &options, pane, &after).expect("after snapshot");
+
+        let PaneRenderDelta::Incremental(delta) = before.diff_to(&after) else {
+            panic!("content change with hidden cursor should stay incremental");
+        };
+        let text = String::from_utf8(delta.frame().to_vec()).expect("delta is utf8");
+
+        assert!(
+            text.ends_with("\u{1b}[u\u{1b}[?25l"),
+            "busy frame must hide the cursor after the restore, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn pane_delta_visible_cursor_busy_frame_reasserts_position_and_show() {
+        let session = Session::new(session_name("alpha"), TerminalSize { cols: 10, rows: 4 });
+        let pane = session.window().active_pane().expect("active pane");
+        let options = OptionStore::new();
+        let before = screen_with(b"abc\x1b[1;1H");
+        let after = screen_with(b"abd\x1b[1;1H");
+        let before = PaneRenderSnapshot::capture(&session, &options, pane, &before)
+            .expect("before snapshot");
+        let after =
+            PaneRenderSnapshot::capture(&session, &options, pane, &after).expect("after snapshot");
+
+        let PaneRenderDelta::Incremental(delta) = before.diff_to(&after) else {
+            panic!("content change with unchanged cursor should stay incremental");
+        };
+        let text = String::from_utf8(delta.frame().to_vec()).expect("delta is utf8");
+
+        assert!(text.contains("\u{1b}[u"));
+        assert!(
+            text.ends_with("\u{1b}[1;1H\u{1b}[?25h"),
+            "busy frame must re-position and show the unchanged cursor, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn pane_delta_visible_to_hidden_transition_emits_hide() {
+        let session = Session::new(session_name("alpha"), TerminalSize { cols: 10, rows: 4 });
+        let pane = session.window().active_pane().expect("active pane");
+        let options = OptionStore::new();
+        let before = screen_with(b"abc");
+        let after = screen_with(b"abc\x1b[?25l");
+        let before = PaneRenderSnapshot::capture(&session, &options, pane, &before)
+            .expect("before snapshot");
+        let after =
+            PaneRenderSnapshot::capture(&session, &options, pane, &after).expect("after snapshot");
+
+        let PaneRenderDelta::Incremental(delta) = before.diff_to(&after) else {
+            panic!("cursor visibility change should stay incremental");
+        };
+
+        assert_eq!(delta.frame(), b"\x1b[?25l");
+    }
+
+    #[test]
+    fn pane_delta_hidden_to_visible_transition_emits_position_and_show() {
+        let session = Session::new(session_name("alpha"), TerminalSize { cols: 10, rows: 4 });
+        let pane = session.window().active_pane().expect("active pane");
+        let options = OptionStore::new();
+        let before = screen_with(b"abc\x1b[?25l");
+        let after = screen_with(b"abc\x1b[?25l\x1b[?25h");
+        let before = PaneRenderSnapshot::capture(&session, &options, pane, &before)
+            .expect("before snapshot");
+        let after =
+            PaneRenderSnapshot::capture(&session, &options, pane, &after).expect("after snapshot");
+
+        let PaneRenderDelta::Incremental(delta) = before.diff_to(&after) else {
+            panic!("cursor visibility change should stay incremental");
+        };
+
+        assert_eq!(delta.frame(), b"\x1b[1;4H\x1b[?25h");
+    }
+
+    #[test]
+    fn pane_delta_no_change_produces_empty_frame() {
+        let session = Session::new(session_name("alpha"), TerminalSize { cols: 10, rows: 4 });
+        let pane = session.window().active_pane().expect("active pane");
+        let options = OptionStore::new();
+        let before = screen_with(b"abc");
+        let after = screen_with(b"abc");
+        let before = PaneRenderSnapshot::capture(&session, &options, pane, &before)
+            .expect("before snapshot");
+        let after =
+            PaneRenderSnapshot::capture(&session, &options, pane, &after).expect("after snapshot");
+
+        assert_eq!(
+            before.diff_to(&after),
+            PaneRenderDelta::Incremental(super::PaneRenderDeltaFrame {
+                frame: Vec::new(),
+                cursor_style: None,
+            })
+        );
+    }
+
+    #[test]
+    fn pane_snapshot_captures_hidden_cursor_as_hide_sequence() {
+        let session = Session::new(session_name("alpha"), TerminalSize { cols: 10, rows: 4 });
+        let pane = session.window().active_pane().expect("active pane");
+        let options = OptionStore::new();
+        let screen = screen_with(b"abc\x1b[?25l");
+
+        let snapshot =
+            PaneRenderSnapshot::capture(&session, &options, pane, &screen).expect("snapshot");
+
+        assert_eq!(snapshot.cursor, b"\x1b[?25l".to_vec());
     }
 
     #[test]
