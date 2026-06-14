@@ -180,7 +180,7 @@ impl RequestHandler {
                 .ok_or_else(|| session_not_found(session_name))?;
             let session = attach_support::sized_session(session, Some(client_size));
             let outer_terminal = OuterTerminal::resolve(&state.options, terminal_context);
-            let frame = crate::renderer::render_status_only_with_attached_count_and_prompt(
+            let mut frame = crate::renderer::render_status_only_with_attached_count_and_prompt(
                 session.as_ref(),
                 &state.options,
                 attached_count,
@@ -188,6 +188,29 @@ impl RequestHandler {
                 Some(&state),
                 key_table.as_deref(),
             );
+            // The status frame ends on a bare SCORC restore (ESC[u), which parks the
+            // cursor at a stale/home register during idle alt-screen sessions. Mirror the
+            // full-render path (handler_attach.rs) and the delta renderer: when no prompt
+            // owns the cursor, re-assert the pane cursor so the status-only frame is
+            // self-sufficient instead of trusting SCORC.
+            if prompt.is_none() {
+                if let Some(active_pane) = session.as_ref().window().active_pane().cloned() {
+                    let active_screen = state
+                        .pane_copy_mode_render_screen(session_name, active_pane.id())
+                        .or_else(|| state.pane_render_screen(session_name, active_pane.id()));
+                    if let Some(screen) = active_screen.as_ref() {
+                        frame.extend_from_slice(
+                            crate::renderer::render_pane_cursor(
+                                session.as_ref(),
+                                &state.options,
+                                &active_pane,
+                                screen,
+                            )
+                            .as_slice(),
+                        );
+                    }
+                }
+            }
             outer_terminal.wrap_render_frame(&frame)
         };
         self.send_attach_control(
