@@ -4094,6 +4094,10 @@ fn set_option_bare_choice_toggles_by_index_like_tmux() -> Result<(), Box<dyn Err
 
     assert_success(&harness.run(&["new-session", "-d", "-s", "alpha"])?);
 
+    // bento patch: pin the starting choice rather than inheriting the default.
+    // bento defaults mode-keys to vi (index 1), so a bare toggle would land on
+    // emacs and fail for a reason unrelated to the index-stepping property.
+    assert_success(&harness.run(&["set-option", "-w", "mode-keys", "emacs"])?);
     assert_success(&harness.run(&["set-option", "-w", "mode-keys"])?);
     let mode_keys = harness.run(&["show-options", "-wqv", "mode-keys"])?;
     assert_eq!(stdout(&mode_keys), "vi\n");
@@ -4501,6 +4505,12 @@ fn set_option_without_target_uses_current_scope_not_global() -> Result<(), Box<d
     let beta_status = harness.run(&["show-options", "-v", "-t", "beta", "status"])?;
     assert_eq!(stdout(&beta_status), "off\n");
 
+    // bento patch: pin the global explicitly. This case proves an untargeted
+    // set-option lands on the *current* scope and not the global one, which it can
+    // only show if alpha's inherited value differs from beta's. bento defaults
+    // mode-keys to vi, so inheriting the default would make both sides read "vi"
+    // and the assertion would pass while proving nothing.
+    assert_success(&harness.run(&["set-option", "-wg", "mode-keys", "emacs"])?);
     assert_success(&harness.run(&["set-option", "mode-keys", "vi"])?);
     let alpha_mode = harness.run(&["show-options", "-wv", "-t", "alpha", "mode-keys"])?;
     assert_eq!(stdout(&alpha_mode), "");

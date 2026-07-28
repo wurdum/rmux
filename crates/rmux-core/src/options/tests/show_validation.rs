@@ -378,9 +378,44 @@ fn input_buffer_size_rejects_values_below_tmux_minimum() {
     );
 }
 
+// bento patch: pin the vendored default affirmatively. bento's copy-mode contract
+// (Space begins a selection, Enter copies and exits) is vi's, and bento never
+// sources an rmux config file, so this default is the only thing that establishes
+// it. A future subtree pull that resolves the table.rs conflict toward upstream's
+// "emacs" would otherwise revert copy mode with a fully green suite.
+#[test]
+fn mode_keys_defaults_to_vi_for_bento_copy_mode() {
+    let store = OptionStore::new();
+    let alpha = session_name("alpha");
+
+    // `resolved` is what falls back to the registry default; `global_value` only
+    // reports an explicitly set value and is None on a fresh store.
+    assert_eq!(
+        store.resolved(&alpha).get(&OptionName::ModeKeys),
+        Some(&"vi".to_owned()),
+        "bento's vendored rmux must default mode-keys to vi"
+    );
+}
+
 #[test]
 fn bare_choice_options_toggle_by_choice_index_like_tmux() {
     let mut store = OptionStore::new();
+
+    // bento patch: pin the starting choice explicitly instead of inheriting the
+    // default. What this test is about is that a bare set-option steps by choice
+    // index; bento defaults mode-keys to vi (index 1), so inheriting it would make
+    // the toggle land on emacs and fail for a reason unrelated to the property.
+    store
+        .set_by_name(
+            OptionScopeSelector::WindowGlobal,
+            "mode-keys",
+            Some("emacs".to_owned()),
+            SetOptionMode::Replace,
+            false,
+            false,
+            false,
+        )
+        .expect("mode-keys accepts emacs");
 
     store
         .set_by_name(

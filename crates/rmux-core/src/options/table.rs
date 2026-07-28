@@ -1506,7 +1506,11 @@ pub(super) const OPTIONS: &[OptionMetadata] = &[
         SCOPE_WINDOW,
         GlobalRoot::Window,
         OptionValueType::Choice(MODE_KEYS_CHOICES),
-        DefaultValue::Scalar("emacs"),
+        // bento patch: vi is bento's documented copy-mode contract — Space begins a
+        // selection, Enter copies and exits. bento never sources rmux config files
+        // (the daemon's config load is Disabled), so this default is the only place
+        // the choice can land.
+        DefaultValue::Scalar("vi"),
         "",
         false,
         EFFECT_NONE,

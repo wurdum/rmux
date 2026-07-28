@@ -40,6 +40,27 @@ fn session_name(value: &str) -> SessionName {
     SessionName::new(value).expect("valid session name")
 }
 
+// bento patch: bento's vendored rmux defaults mode-keys to vi, so a test that
+// means to exercise the *emacs* copy-mode table has to select it explicitly
+// rather than inherit the default. Some of these fail loudly under the vi
+// default; at least one passed while silently exercising vi's binding, which is
+// the worse failure and the reason the selection is explicit rather than
+// conditional.
+#[allow(dead_code)]
+async fn set_emacs_mode_keys(handler: &RequestHandler, session: &SessionName) {
+    assert!(matches!(
+        handler
+            .handle(Request::SetOption(SetOptionRequest {
+                scope: ScopeSelector::Window(WindowTarget::with_window(session.clone(), 0)),
+                option: OptionName::ModeKeys,
+                value: "emacs".to_owned(),
+                mode: SetOptionMode::Replace,
+            }))
+            .await,
+        Response::SetOption(_)
+    ));
+}
+
 #[cfg(unix)]
 fn default_shell_window_name() -> String {
     "bash".to_owned()

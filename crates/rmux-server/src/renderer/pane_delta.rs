@@ -1616,4 +1616,108 @@ mod tests {
             "the second row must not inherit row one's background: {text:?}"
         );
     }
+
+    // bento patch (test-only): every incremental path that emits a cursor restore
+    // must re-assert the cursor state after it. `\x1b[u` moves the physical cursor
+    // to whatever the save register holds, which against an alt-screen TUI is stale
+    // or home — so a frame ending on a bare restore parks a cursor the viewer then
+    // sees at top-left until the next output.
+    //
+    // These pin the case upstream's own tests do not reach: cursor hidden and
+    // *unchanged* across the diff, which is what a TUI does for most of a busy turn
+    // and is the exact shape of the original defect. Upstream currently satisfies
+    // them unconditionally; the guards exist so that a future re-gate behind
+    // `cursor_visibility_changed` fails here instead of reaching a user.
+    fn hidden_cursor_snapshot(lines: &[&[u8]], revisions: Vec<u64>) -> PaneRenderSnapshot {
+        PaneRenderSnapshot {
+            x: 0,
+            y: 0,
+            rows: lines.len() as u16,
+            cols: 10,
+            terminal_cols: 10,
+            terminal_rows: lines.len() as u16,
+            lines: render_lines(lines),
+            cursor: b"\x1b[1;1H".to_vec(),
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_style: 0,
+            title: String::new(),
+            path: String::new(),
+            // mode 0 => MODE_CURSOR clear => cursor hidden, and it stays hidden
+            // across the diff, so `cursor_visibility_changed` is false throughout.
+            mode: 0,
+            line_revisions: revisions,
+            scrollbar: None,
+        }
+    }
+
+    fn assert_restore_is_followed_by_cursor_state(frame: &[u8], path: &str) {
+        let text = String::from_utf8(frame.to_vec()).expect("frame is utf8");
+        assert!(
+            text.contains("\u{1b}[u"),
+            "{path} was expected to emit a cursor restore; \
+             this guard is meaningless without one: {text:?}"
+        );
+        assert!(
+            !text.ends_with("\u{1b}[u"),
+            "{path} ends on a bare restore, which parks the cursor: {text:?}"
+        );
+        assert!(
+            text.ends_with("\u{1b}[?25l"),
+            "{path} must re-assert the hidden cursor after the restore: {text:?}"
+        );
+    }
+
+    #[test]
+    fn diff_to_reasserts_cursor_after_restore_when_visibility_is_unchanged() {
+        let before = hidden_cursor_snapshot(&[b"aaa", b"bbb"], vec![1, 1]);
+        let after = PaneRenderSnapshot {
+            lines: render_lines(&[b"aaa", b"ccc"]),
+            line_revisions: vec![1, 2],
+            ..before.clone()
+        };
+
+        let PaneRenderDelta::Incremental(delta) = before.diff_to(&after) else {
+            panic!("a single changed row should stay incremental");
+        };
+
+        assert_restore_is_followed_by_cursor_state(delta.frame(), "diff_to");
+    }
+
+    #[test]
+    fn diff_scroll_up_reasserts_cursor_after_restore_when_visibility_is_unchanged() {
+        let before = hidden_cursor_snapshot(&[b"one", b"two", b"three"], vec![1, 2, 3]);
+        let after = PaneRenderSnapshot {
+            lines: render_lines(&[b"two", b"three", b"four"]),
+            line_revisions: vec![2, 3, 4],
+            ..before.clone()
+        };
+
+        let PaneRenderDelta::Incremental(delta) = before.diff_to(&after) else {
+            panic!("a one-row scroll should stay incremental");
+        };
+
+        assert_restore_is_followed_by_cursor_state(delta.frame(), "diff_scroll_up_to");
+    }
+
+    #[test]
+    fn positioned_plain_output_reasserts_cursor_after_restore() {
+        // The plain-ASCII fast path the live render actually takes on a busy
+        // streaming turn — the workload the cursor-parking defect appeared in.
+        // It requires a horizontally offset pane (x != 0) to engage at all.
+        let mut snapshot = PaneRenderSnapshot {
+            x: 2,
+            cols: 8,
+            terminal_cols: 10,
+            cursor: b"\x1b[1;3H".to_vec(),
+            cursor_col: 2,
+            ..hidden_cursor_snapshot(&[b"", b""], vec![0, 0])
+        };
+
+        let frame = snapshot
+            .positioned_plain_output_frame(b"abc")
+            .expect("plain ascii output on an offset pane takes the positioned path");
+
+        assert_restore_is_followed_by_cursor_state(&frame, "positioned_plain_output_frame");
+    }
 }

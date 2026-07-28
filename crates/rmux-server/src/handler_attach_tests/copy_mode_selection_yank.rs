@@ -324,6 +324,7 @@ async fn copy_mode_emacs_escape_exits_active_selection_without_leak() {
     let alpha = session_name("alpha");
     let _control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
     let target = PaneTarget::new(alpha.clone(), 0);
+    set_emacs_mode_keys(&handler, &alpha).await;
 
     set_top_buffer_bytes(&handler, ORACLE_OLD_BUFFER_BYTES).await;
     assert_eq!(

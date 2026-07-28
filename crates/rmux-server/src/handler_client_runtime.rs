@@ -199,7 +199,7 @@ impl RequestHandler {
         session_name: &rmux_proto::SessionName,
     ) -> Result<(), RmuxError> {
         let attached_count = self.attached_count(session_name).await;
-        let (prompt, terminal_context, client_size, key_table) = {
+        let (prompt, client_owns_cursor, terminal_context, client_size, key_table) = {
             let active_attach = self.active_attach.lock().await;
             let active = active_attach
                 .by_pid
@@ -214,6 +214,15 @@ impl RequestHandler {
                     .prompt
                     .as_ref()
                     .map(prompt_support::ClientPromptState::rendered_prompt),
+                // Every client surface that draws its own cursor, not just the
+                // command prompt: an overlay (display-menu/display-popup), a
+                // mode tree (choose-tree), and display-panes each place the
+                // cursor themselves and have nothing to redraw it if the status
+                // refresh moves it.
+                active.prompt.is_some()
+                    || active.overlay.is_some()
+                    || active.mode_tree.is_some()
+                    || active.display_panes.is_some(),
                 active.terminal_context.clone(),
                 active.client_size,
                 active.key_table_name.clone(),
@@ -229,7 +238,7 @@ impl RequestHandler {
             let key_table = effective_client_key_table_name(&state, session, key_table.as_deref());
             let session = attach_support::sized_session(session, Some(client_size));
             let outer_terminal = OuterTerminal::resolve(&state.options, terminal_context);
-            let frame = crate::renderer::render_status_only_with_attached_count_and_prompt(
+            let mut frame = crate::renderer::render_status_only_with_attached_count_and_prompt(
                 session.as_ref(),
                 &state.options,
                 attached_count,
@@ -241,6 +250,42 @@ impl RequestHandler {
                     ..crate::renderer::StatusRenderContext::default()
                 },
             );
+            // The status line saves and restores the cursor around its own draw
+            // (DECSC/DECRC), so a status-only frame ends by trusting whatever the
+            // restore register holds. Against an alt-screen TUI that register can
+            // be stale or home, which parks a visible cursor at top-left until the
+            // next pane output. Nothing else redraws it: this frame carries no pane
+            // content. So re-assert the pane cursor here, mirroring the full-render
+            // path's two arms exactly — a copy-mode pane needs the snapshot arm,
+            // whose gutter layout `render_pane_cursor` cannot reconstruct, and would
+            // otherwise be placed a line-number-width off.
+            if !client_owns_cursor {
+                if let Some(active_pane) = session.as_ref().window().active_pane().cloned() {
+                    if let Some(snapshot) =
+                        state.pane_copy_mode_render_snapshot(session_name, active_pane.id())
+                    {
+                        frame.extend_from_slice(
+                            crate::renderer::render_copy_mode_pane_cursor(
+                                session.as_ref(),
+                                &state.options,
+                                &active_pane,
+                                &snapshot,
+                            )
+                            .as_slice(),
+                        );
+                    } else if let Some(screen) = state.pane_screen(session_name, active_pane.id()) {
+                        frame.extend_from_slice(
+                            crate::renderer::render_pane_cursor(
+                                session.as_ref(),
+                                &state.options,
+                                &active_pane,
+                                &screen,
+                            )
+                            .as_slice(),
+                        );
+                    }
+                }
+            }
             outer_terminal.wrap_render_frame(&frame)
         };
         match expected_attach_id {

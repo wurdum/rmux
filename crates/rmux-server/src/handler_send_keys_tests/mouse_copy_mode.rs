@@ -169,6 +169,7 @@ async fn copy_mode_single_motion_drag_copies_from_press_to_motion_cell() {
         })))
         .await;
     assert!(matches!(created, Response::NewSession(_)));
+    set_emacs_mode_keys(&handler, &alpha).await;
     replace_transcript_contents(&handler, &target, size, b"ABCDEF\r\n").await;
 
     let (control_tx, _control_rx) = mpsc::unbounded_channel();
@@ -288,6 +289,7 @@ async fn copy_mode_mouse_entry_uses_left_scrollbar_content_origin() {
         })))
         .await;
     assert!(matches!(created, Response::NewSession(_)));
+    set_emacs_mode_keys(&handler, &alpha).await;
     for (option, value) in [
         (OptionName::PaneScrollbars, "on"),
         (OptionName::PaneScrollbarsPosition, "left"),

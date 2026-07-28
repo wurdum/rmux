@@ -47,6 +47,11 @@ async fn attached_copy_mode_emacs_slash_is_unbound_and_not_forwarded() {
     let alpha = session_name("alpha");
     let _control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
     let target = PaneTarget::new(alpha.clone(), 0);
+    // Without this the case runs under bento's vi default, where `/` *does* open
+    // the search prompt — and it still passes, because entering search leaves
+    // `pane_mode_status` unchanged and consumes the key either way. It would
+    // assert nothing about emacs.
+    set_emacs_mode_keys(&handler, &alpha).await;
     replace_transcript_contents(
         &handler,
         &target,
@@ -102,6 +107,7 @@ async fn attached_copy_mode_emacs_ctrl_s_opens_search_prompt() {
     let alpha = session_name("alpha");
     let _control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
     let target = PaneTarget::new(alpha.clone(), 0);
+    set_emacs_mode_keys(&handler, &alpha).await;
     replace_transcript_contents(
         &handler,
         &target,

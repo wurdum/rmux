@@ -396,6 +396,29 @@ async fn set_set_clipboard(handler: &RequestHandler, value: &str) {
     );
 }
 
+// bento patch: bento's vendored rmux defaults mode-keys to vi, so a case that
+// drives the emacs copy-mode key table has to select it explicitly rather than
+// inherit the default.
+async fn set_emacs_mode_keys(handler: &RequestHandler) {
+    let response = handler
+        .handle(Request::SetOptionByName(Box::new(SetOptionByNameRequest {
+            scope: OptionScopeSelector::WindowGlobal,
+            name: "mode-keys".to_owned(),
+            value: Some("emacs".to_owned()),
+            mode: SetOptionMode::Replace,
+            only_if_unset: false,
+            unset: false,
+            unset_pane_overrides: false,
+            format: false,
+            format_target: None,
+        })))
+        .await;
+    assert!(
+        matches!(response, Response::SetOptionByName(_)),
+        "set-option mode-keys returned {response:?}"
+    );
+}
+
 fn take_write(control: AttachControl) -> Option<Vec<u8>> {
     match control {
         AttachControl::Write(bytes) => Some(bytes),
@@ -962,6 +985,7 @@ async fn copy_mode_buffer_yank_emits_clipboard_when_set_clipboard_enabled() {
     )
     .await;
     let requester_pid = 42;
+    set_emacs_mode_keys(&handler).await;
     set_set_clipboard(&handler, "external").await;
 
     let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();

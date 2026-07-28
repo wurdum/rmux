@@ -987,6 +987,7 @@ async fn send_keys_k_uses_copy_mode_bindings_until_copy_mode_exits() {
         }))
         .await;
     assert!(matches!(created, Response::NewSession(_)));
+    set_emacs_mode_keys(&handler, &alpha).await;
 
     let (control_tx, _control_rx) = mpsc::unbounded_channel();
     let _attach_id = handler
