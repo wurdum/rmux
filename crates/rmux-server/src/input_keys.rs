@@ -74,6 +74,12 @@ pub(crate) fn encode_key_with_backspace(
         return key_code_to_bytes(key);
     }
 
+    // bento patch: prefer the legacy form for keys the extended encodings cannot
+    // spell. See `legacy_vt10x_spells_key`.
+    if legacy_vt10x_spells_key(key) {
+        return input_key_vt10x(pane_mode, key, backspace);
+    }
+
     if (pane_mode & mode::MODE_KEYS_EXTENDED_2) != 0 {
         input_key_extended(key, format).or_else(|| input_key_vt10x(pane_mode, key, backspace))
     } else if (pane_mode & mode::MODE_KEYS_EXTENDED) != 0 {
@@ -252,6 +258,45 @@ fn key_from_modified_cursor_terminator(terminator: u8) -> Option<KeyCode> {
         b'H' => key_string_lookup_string("Home"),
         _ => None,
     }
+}
+
+/// bento patch: whether the legacy VT10x fallback actually spells `key`, in which
+/// case it must be preferred over the extended encodings.
+///
+/// `input_key_extended` interpolates `key & KEYC_MASK_KEY` as a decimal
+/// codepoint, but that mask spans the key *type* field as well as the payload.
+/// A named key therefore renders its type sentinel instead of a character:
+/// `M-BSpace` encodes to `ESC[27;3;8589934599~` under modifyOtherKeys mode 2,
+/// which is not a sequence any application can act on — that is what silently
+/// broke Alt/Option+Backspace word-delete. The legacy `ESC` + byte form is what
+/// pane modes 0 and 1 already emit and what the pane received before the whole
+/// `ESC`+control class was decoded into semantic Meta keys.
+///
+/// The predicate is deliberately narrow: `input_key_vt10x` has no modified form
+/// for named keys, and declining the extended form for every non-codepoint
+/// payload fails in two *destructive* ways rather than merely falling back.
+/// A `C-` variant misses `standard_vt10x_sequence` (which strips only Meta) and
+/// then falls out of the trailing control map as `None`, so the keystroke is
+/// dropped outright. An `S-` variant instead reaches `push((key & 0x7f) as u8)`
+/// and emits the sentinel's low bits as a live control byte — `S-DC` would send
+/// 0x15 (kill-line) and `S-F12` 0x13, which is XOFF and freezes flow control.
+/// Keys outside this predicate keep upstream's sentinel sequence: still wrong,
+/// but inert.
+fn legacy_vt10x_spells_key(key: KeyCode) -> bool {
+    // BSpace is matched ahead of the control map in `input_key_vt10x` and threads
+    // the configured erase byte, so the legacy form is correct under any modifier.
+    if (key & KEYC_MASK_KEY) == KEYC_BSPACE {
+        return true;
+    }
+
+    // Otherwise only an unmodified-or-Meta named key qualifies — Meta is the one
+    // modifier `standard_vt10x_sequence` strips, so it is the only one whose
+    // sequence resolves.
+    if (key & (KEYC_SHIFT | KEYC_CTRL)) != 0 {
+        return false;
+    }
+
+    standard_vt10x_sequence(key).is_some()
 }
 
 fn input_key_extended(key: KeyCode, format: ExtendedKeyFormat) -> Option<Vec<u8>> {

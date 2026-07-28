@@ -380,6 +380,58 @@ mod tests {
         );
     }
 
+    // bento patch: the daemon never passes raw bytes through — every attached
+    // keystroke is decoded to a KeyCode and re-encoded for the live pane. So the
+    // property bento depends on is the *round trip*, and it is the half that
+    // broke: both sides' one-directional tests stayed green while Alt+Backspace
+    // silently stopped deleting a word. This replaces the old
+    // `attached_escape_prefix_keeps_non_enter_control_partial` guard, which
+    // asserted these sequences stay Partial — false by design as of v0.9.1.
+    #[test]
+    fn attached_meta_control_keys_round_trip_through_the_pane_encoder() {
+        use crate::input_keys::{encode_key, ExtendedKeyFormat};
+        use rmux_core::input::mode;
+
+        for sequence in [b"\x1b\x7f".as_slice(), b"\x1b\r".as_slice()] {
+            let AttachedKeyDecode::Matched { size, key } = decode_attached_key(sequence, None)
+            else {
+                panic!("{sequence:?} should decode to a complete key");
+            };
+            assert_eq!(size, sequence.len(), "{sequence:?} consumed size");
+
+            // Pane mode 0 is the form the pane received before the ESC+control
+            // class was decoded into semantic Meta keys, so it is the reference
+            // the re-encode has to reproduce.
+            assert_eq!(
+                encode_key(0, ExtendedKeyFormat::Xterm, key).as_deref(),
+                Some(sequence),
+                "{sequence:?} must re-encode to itself at pane mode 0"
+            );
+        }
+
+        // Under modifyOtherKeys the two diverge deliberately: BSpace has no
+        // well-formed extended encoding (its payload is a type sentinel), while
+        // Enter's is a real codepoint that Claude acts on.
+        let AttachedKeyDecode::Matched { key, .. } = decode_attached_key(b"\x1b\x7f", None) else {
+            panic!("M-BSpace should decode");
+        };
+        assert_eq!(
+            encode_key(mode::MODE_KEYS_EXTENDED_2, ExtendedKeyFormat::Xterm, key).as_deref(),
+            Some(b"\x1b\x7f".as_slice()),
+            "M-BSpace must round-trip to the legacy form under modifyOtherKeys too"
+        );
+    }
+
+    #[test]
+    fn attached_escape_prefix_keeps_double_escape_partial() {
+        // A lone ESC must stay buffered for the escape-time flush; only the
+        // generic ESC+control arm is complete, and 0x1b is excluded from it.
+        assert!(matches!(
+            decode_attached_key(b"\x1b\x1b", None),
+            AttachedKeyDecode::Partial
+        ));
+    }
+
     #[test]
     fn effective_client_table_uses_session_default_beneath_transient_table() {
         let session_name = SessionName::new("alpha").expect("valid session name");

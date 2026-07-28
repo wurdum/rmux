@@ -452,6 +452,131 @@ fn meta_backspace_encodes_escape_del() {
     );
 }
 
+// bento patch: the encode-side Meta+control matrix. Upstream's
+// `meta_backspace_encodes_escape_del` covers pane mode 0 only, and mode 0 is
+// exactly where the defect is invisible — the regression this pins lives under
+// modifyOtherKeys, which is the mode Claude Code's TUI puts the pane in.
+const EXTENDED_PANE_MODES: [(u32, ExtendedKeyFormat, &str); 4] = [
+    (0, ExtendedKeyFormat::Xterm, "legacy"),
+    (mode::MODE_KEYS_EXTENDED, ExtendedKeyFormat::Xterm, "mode-1"),
+    (
+        mode::MODE_KEYS_EXTENDED_2,
+        ExtendedKeyFormat::Xterm,
+        "mode-2 xterm",
+    ),
+    (
+        mode::MODE_KEYS_EXTENDED_2,
+        ExtendedKeyFormat::CsiU,
+        "mode-2 csi-u",
+    ),
+];
+
+#[test]
+fn encode_key_meta_backspace_across_pane_modes() {
+    for (pane_mode, format, label) in EXTENDED_PANE_MODES {
+        assert_eq!(
+            encode_key(pane_mode, format, parse_key("M-BSpace")).as_deref(),
+            Some(b"\x1b\x7f".as_slice()),
+            "M-BSpace must reach the pane as legacy ESC DEL under {label}; \
+             the extended form renders the KEYC_BSPACE type sentinel, not a codepoint"
+        );
+    }
+}
+
+#[test]
+fn encode_key_meta_backspace_threads_the_configured_erase_byte() {
+    for (pane_mode, format, label) in EXTENDED_PANE_MODES {
+        assert_eq!(
+            encode_key_with_backspace(pane_mode, format, parse_key("M-BSpace"), 0x08).as_deref(),
+            Some(b"\x1b\x08".as_slice()),
+            "the configured erase byte must survive the legacy preference under {label}"
+        );
+    }
+}
+
+#[test]
+fn encode_key_meta_enter_keeps_upstream_behaviour_across_pane_modes() {
+    // Enter's payload is codepoint 13, so the extended form is well-formed and
+    // Claude acts on it. It must keep upstream's per-mode behaviour rather than
+    // being swept into the legacy preference by symmetry with BSpace.
+    assert_eq!(
+        encode_key(0, ExtendedKeyFormat::Xterm, parse_key("M-Enter")).as_deref(),
+        Some(b"\x1b\r".as_slice())
+    );
+    assert_eq!(
+        encode_key(
+            mode::MODE_KEYS_EXTENDED,
+            ExtendedKeyFormat::Xterm,
+            parse_key("M-Enter")
+        )
+        .as_deref(),
+        Some(b"\x1b\r".as_slice())
+    );
+    assert_eq!(
+        encode_key(
+            mode::MODE_KEYS_EXTENDED_2,
+            ExtendedKeyFormat::Xterm,
+            parse_key("M-Enter")
+        )
+        .as_deref(),
+        Some(b"\x1b[27;3;13~".as_slice())
+    );
+    assert_eq!(
+        encode_key(
+            mode::MODE_KEYS_EXTENDED_2,
+            ExtendedKeyFormat::CsiU,
+            parse_key("M-Enter")
+        )
+        .as_deref(),
+        Some(b"\x1b[13;3u".as_slice())
+    );
+}
+
+#[test]
+fn encode_key_meta_tab_keeps_upstream_extended_form() {
+    // Tab's payload is codepoint 9, so `ESC[27;3;9~` is well-formed. Nothing
+    // established that Claude acts on it, but a malformed sequence is not the
+    // problem here, so the rule deliberately leaves Tab on upstream's behaviour.
+    assert_eq!(
+        encode_key(
+            mode::MODE_KEYS_EXTENDED_2,
+            ExtendedKeyFormat::Xterm,
+            parse_key("M-Tab")
+        )
+        .as_deref(),
+        Some(b"\x1b[27;3;9~".as_slice())
+    );
+}
+
+#[test]
+fn encode_key_declines_legacy_for_modified_named_keys() {
+    // The bound that a review caught the first cut missing. Routing these into
+    // input_key_vt10x is destructive, not a fallback: it has no modified form
+    // for a named key, so a C- variant returns None (the keystroke is dropped
+    // outright) and an S- variant emits the sentinel's low bits as a live
+    // control byte — S-F12 would send 0x13, which is XOFF. They keep upstream's
+    // sentinel sequence instead: still wrong, but inert.
+    for name in ["S-F12", "S-DC", "S-PageDown", "C-DC", "C-Home"] {
+        let encoded = encode_key(
+            mode::MODE_KEYS_EXTENDED_2,
+            ExtendedKeyFormat::Xterm,
+            parse_key(name),
+        );
+        let bytes = encoded
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} must still encode to something"));
+
+        assert!(
+            bytes.starts_with(b"\x1b["),
+            "{name} must keep an extended sequence, got {bytes:?}"
+        );
+        assert!(
+            bytes.len() > 2 && !bytes[1..].contains(&0x13),
+            "{name} must not emit a bare control byte such as XOFF: {bytes:?}"
+        );
+    }
+}
+
 #[test]
 fn configured_backspace_byte_controls_plain_and_meta_backspace() {
     let backspace = parse_key("BSpace");
