@@ -396,9 +396,8 @@ async fn set_set_clipboard(handler: &RequestHandler, value: &str) {
     );
 }
 
-// bento patch: bento's vendored rmux defaults mode-keys to vi, so a case that
-// drives the emacs copy-mode key table has to select it explicitly rather than
-// inherit the default.
+// bento patch: mode-keys defaults to vi (see rmux-core's options table), so a
+// case driving the emacs copy-mode table selects it explicitly.
 async fn set_emacs_mode_keys(handler: &RequestHandler) {
     let response = handler
         .handle(Request::SetOptionByName(Box::new(SetOptionByNameRequest {

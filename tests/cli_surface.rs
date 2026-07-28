@@ -4506,10 +4506,10 @@ fn set_option_without_target_uses_current_scope_not_global() -> Result<(), Box<d
     assert_eq!(stdout(&beta_status), "off\n");
 
     // bento patch: pin the global explicitly. This case proves an untargeted
-    // set-option lands on the *current* scope and not the global one, which it can
-    // only show if alpha's inherited value differs from beta's. bento defaults
-    // mode-keys to vi, so inheriting the default would make both sides read "vi"
-    // and the assertion would pass while proving nothing.
+    // set-option lands on the *current* scope, which it can only show if alpha's
+    // inherited value differs from beta's. bento defaults mode-keys to vi, so
+    // without the pin the inherited read below is "vi" and the case fails on the
+    // default rather than on the property it is about.
     assert_success(&harness.run(&["set-option", "-wg", "mode-keys", "emacs"])?);
     assert_success(&harness.run(&["set-option", "mode-keys", "vi"])?);
     let alpha_mode = harness.run(&["show-options", "-wv", "-t", "alpha", "mode-keys"])?;

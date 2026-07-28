@@ -214,9 +214,9 @@ impl RequestHandler {
                     .prompt
                     .as_ref()
                     .map(prompt_support::ClientPromptState::rendered_prompt),
-                // Every client surface that draws its own cursor, not just the
-                // command prompt: an overlay (display-menu/display-popup), a
-                // mode tree (choose-tree), and display-panes each place the
+                // bento patch: every client surface that draws its own cursor, not
+                // just the command prompt — an overlay (display-menu/display-popup),
+                // a mode tree (choose-tree), and display-panes each place the
                 // cursor themselves and have nothing to redraw it if the status
                 // refresh moves it.
                 active.prompt.is_some()
@@ -250,16 +250,21 @@ impl RequestHandler {
                     ..crate::renderer::StatusRenderContext::default()
                 },
             );
-            // The status line saves and restores the cursor around its own draw
-            // (DECSC/DECRC), so a status-only frame ends by trusting whatever the
-            // restore register holds. Against an alt-screen TUI that register can
-            // be stale or home, which parks a visible cursor at top-left until the
-            // next pane output. Nothing else redraws it: this frame carries no pane
-            // content. So re-assert the pane cursor here, mirroring the full-render
-            // path's two arms exactly — a copy-mode pane needs the snapshot arm,
-            // whose gutter layout `render_pane_cursor` cannot reconstruct, and would
-            // otherwise be placed a line-number-width off.
-            if !client_owns_cursor {
+            // bento patch: the status line saves and restores the cursor around its
+            // own draw (DECSC/DECRC), so a status-only frame ends by trusting
+            // whatever the restore register holds. Against an alt-screen TUI that
+            // register can be stale or home, which parks a visible cursor at
+            // top-left until the next pane output. Nothing else redraws it: this
+            // frame carries no pane content. So re-assert the pane cursor here,
+            // mirroring the full-render path's two arms exactly — a copy-mode pane
+            // needs the snapshot arm, whose gutter layout `render_pane_cursor`
+            // cannot reconstruct, and would otherwise be placed a line-number-width
+            // off.
+            //
+            // An empty frame is skipped: with `status off` the status renderer emits
+            // nothing, so there is no restore to override and appending a cursor
+            // move would turn a no-op refresh into a periodic unsolicited reposition.
+            if !client_owns_cursor && !frame.is_empty() {
                 if let Some(active_pane) = session.as_ref().window().active_pane().cloned() {
                     if let Some(snapshot) =
                         state.pane_copy_mode_render_snapshot(session_name, active_pane.id())

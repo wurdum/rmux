@@ -74,13 +74,17 @@ pub(crate) fn encode_key_with_backspace(
         return key_code_to_bytes(key);
     }
 
-    // bento patch: prefer the legacy form for keys the extended encodings cannot
-    // spell. See `legacy_vt10x_spells_key`.
-    if legacy_vt10x_spells_key(key) {
-        return input_key_vt10x(pane_mode, key, backspace);
-    }
-
     if (pane_mode & mode::MODE_KEYS_EXTENDED_2) != 0 {
+        // bento patch: prefer the legacy form for keys the extended encodings
+        // cannot spell. See `legacy_vt10x_spells_key`. Scoped to mode 2 because
+        // that is the only mode that reaches `input_key_extended` for these keys —
+        // mode 1 already routes Meta keys through `input_key_vt10x(0, …)`, and
+        // preempting it here would pass the live `pane_mode` instead of that
+        // hardcoded 0, changing the keypad/cursor stripping (`M-KP1` under
+        // application-keypad mode would become `ESC ESC O q` instead of `ESC 1`).
+        if legacy_vt10x_spells_key(key) {
+            return input_key_vt10x(pane_mode, key, backspace);
+        }
         input_key_extended(key, format).or_else(|| input_key_vt10x(pane_mode, key, backspace))
     } else if (pane_mode & mode::MODE_KEYS_EXTENDED) != 0 {
         input_key_mode1(key, backspace)
@@ -278,25 +282,29 @@ fn key_from_modified_cursor_terminator(terminator: u8) -> Option<KeyCode> {
 /// A `C-` variant misses `standard_vt10x_sequence` (which strips only Meta) and
 /// then falls out of the trailing control map as `None`, so the keystroke is
 /// dropped outright. An `S-` variant instead reaches `push((key & 0x7f) as u8)`
-/// and emits the sentinel's low bits as a live control byte — `S-DC` would send
-/// 0x15 (kill-line) and `S-F12` 0x13, which is XOFF and freezes flow control.
-/// Keys outside this predicate keep upstream's sentinel sequence: still wrong,
-/// but inert.
+/// and emits the sentinel's low bits as a live control byte — `S-DC` sends 0x15
+/// (kill-line) and `S-F12` 0x13, which is XOFF and freezes flow control.
+///
+/// Under modifyOtherKeys a declined key keeps upstream's sentinel sequence:
+/// still wrong, but inert. Note that this is *not* true at pane mode 0, where
+/// upstream routes it into `input_key_vt10x` and it hits the two traps above —
+/// pre-existing behaviour this patch neither causes nor fixes, pinned by
+/// `encode_key_declined_named_keys_hit_the_legacy_traps_at_pane_mode_0` so the
+/// reassurance above is not read more broadly than it holds.
 fn legacy_vt10x_spells_key(key: KeyCode) -> bool {
-    // BSpace is matched ahead of the control map in `input_key_vt10x` and threads
-    // the configured erase byte, so the legacy form is correct under any modifier.
-    if (key & KEYC_MASK_KEY) == KEYC_BSPACE {
-        return true;
-    }
-
-    // Otherwise only an unmodified-or-Meta named key qualifies — Meta is the one
-    // modifier `standard_vt10x_sequence` strips, so it is the only one whose
-    // sequence resolves.
+    // Meta is the only modifier a legacy form carries (as a leading ESC), and the
+    // only one `standard_vt10x_sequence` strips. Shift and Ctrl would be silently
+    // *dropped* rather than spelled — `C-BSpace` would reach the pane as a bare
+    // erase byte, indistinguishable from plain Backspace — so they keep upstream's
+    // encoding even for BSpace.
     if (key & (KEYC_SHIFT | KEYC_CTRL)) != 0 {
         return false;
     }
 
-    standard_vt10x_sequence(key).is_some()
+    // BSpace is matched ahead of the control map in `input_key_vt10x` and threads
+    // the configured erase byte; every other named key needs its VT10x sequence to
+    // resolve.
+    (key & KEYC_MASK_KEY) == KEYC_BSPACE || standard_vt10x_sequence(key).is_some()
 }
 
 fn input_key_extended(key: KeyCode, format: ExtendedKeyFormat) -> Option<Vec<u8>> {

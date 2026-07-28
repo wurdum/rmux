@@ -2432,3 +2432,244 @@ async fn attached_resize_ignores_zero_sized_terminal_reports() {
         "ignored zero-sized resize must not emit a refresh frame"
     );
 }
+
+// bento patch: drift alarm for the status-refresh cursor re-assertion
+// (`handler_client_runtime.rs`). A status-only refresh draws its bar through
+// `render_formatted_line`, which wraps the draw in DECSC/DECRC and so ends on a
+// bare restore; the bento delta appends an explicit pane-cursor assertion that
+// must come *after* it, so an idle attach never relies on a stale restore
+// register. Requiring the restore to be present — not merely tolerating it — is
+// what makes this the subtree-pull alarm: if a pull drops either the restore or
+// the delta, this fires instead of the cursor parking in a user's terminal.
+//
+// The restore is DECRC (`ESC 8`) as of v0.9.1; it was SCORC (`ESC[u`) at v0.5.0.
+fn assert_cursor_assertion_overrides_restore(frame: &[u8], expected: &[u8]) {
+    let last_restore = frame
+        .windows(2)
+        .rposition(|window| window == b"\x1b8")
+        .expect("status frame must contain the bare DECRC restore (ESC 8)");
+    let assertion = frame
+        .windows(expected.len())
+        .rposition(|window| window == expected)
+        .unwrap_or_else(|| {
+            panic!(
+                "status frame missing cursor assertion {expected:?}: {:?}",
+                String::from_utf8_lossy(frame)
+            )
+        });
+    assert!(
+        assertion > last_restore,
+        "cursor assertion must come after the bare DECRC restore: {:?}",
+        String::from_utf8_lossy(frame)
+    );
+}
+
+#[tokio::test]
+async fn status_refresh_reasserts_pane_cursor() {
+    let handler = RequestHandler::new();
+    let requester_pid = std::process::id();
+    let alpha = session_name("alpha");
+    let mut control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
+
+    replace_transcript_contents(
+        &handler,
+        &PaneTarget::new(alpha.clone(), 0),
+        TerminalSize { cols: 80, rows: 23 },
+        b"\x1b[5;9H",
+    )
+    .await;
+    drain_attach_controls(&mut control_rx);
+
+    handler
+        .refresh_attached_client_status(requester_pid, &alpha)
+        .await
+        .expect("status refresh succeeds");
+
+    let frame = match control_rx.try_recv().expect("status refresh write") {
+        AttachControl::Write(bytes) => bytes,
+        other => panic!("expected a status write, got {other:?}"),
+    };
+    assert_cursor_assertion_overrides_restore(&frame, b"\x1b[5;9H\x1b[?25h");
+    assert!(
+        frame.ends_with(b"\x1b[5;9H\x1b[?25h"),
+        "the pane-cursor assertion must be the final bytes of the frame: {:?}",
+        String::from_utf8_lossy(&frame)
+    );
+}
+
+#[tokio::test]
+async fn status_refresh_hidden_cursor_emits_hide() {
+    let handler = RequestHandler::new();
+    let requester_pid = std::process::id();
+    let alpha = session_name("alpha");
+    let mut control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
+
+    replace_transcript_contents(
+        &handler,
+        &PaneTarget::new(alpha.clone(), 0),
+        TerminalSize { cols: 80, rows: 23 },
+        b"\x1b[?25l",
+    )
+    .await;
+    drain_attach_controls(&mut control_rx);
+
+    handler
+        .refresh_attached_client_status(requester_pid, &alpha)
+        .await
+        .expect("status refresh succeeds");
+
+    let frame = match control_rx.try_recv().expect("status refresh write") {
+        AttachControl::Write(bytes) => bytes,
+        other => panic!("expected a status write, got {other:?}"),
+    };
+    assert_cursor_assertion_overrides_restore(&frame, b"\x1b[?25l");
+    // Anchor on the trailing hide so this cannot pass on a stray ESC[?25l emitted
+    // elsewhere — the appended hide must be the frame's final cursor op.
+    assert!(
+        frame.ends_with(b"\x1b[?25l"),
+        "the hidden-cursor assertion must be the final bytes of the frame: {:?}",
+        String::from_utf8_lossy(&frame)
+    );
+}
+
+#[tokio::test]
+async fn status_refresh_with_prompt_keeps_prompt_cursor() {
+    let handler = RequestHandler::new();
+    let requester_pid = std::process::id();
+    let alpha = session_name("alpha");
+    let mut control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
+
+    replace_transcript_contents(
+        &handler,
+        &PaneTarget::new(alpha.clone(), 0),
+        TerminalSize { cols: 80, rows: 23 },
+        b"\x1b[5;9H",
+    )
+    .await;
+
+    // Enter (but do not submit) a command prompt so a prompt owns the cursor.
+    handler
+        .handle_attached_live_input_for_test(requester_pid, b"\x02:")
+        .await
+        .expect("prefix command prompt input");
+    drain_attach_controls(&mut control_rx);
+
+    handler
+        .refresh_attached_client_status(requester_pid, &alpha)
+        .await
+        .expect("status refresh succeeds");
+
+    let frame = match control_rx.try_recv().expect("status refresh write") {
+        AttachControl::Write(bytes) => bytes,
+        other => panic!("expected a status write, got {other:?}"),
+    };
+    assert!(
+        !frame
+            .windows(b"\x1b[5;9H".len())
+            .any(|window| window == b"\x1b[5;9H"),
+        "an active prompt must keep cursor ownership; the pane cursor must not be reasserted: {:?}",
+        String::from_utf8_lossy(&frame)
+    );
+}
+
+#[tokio::test]
+async fn status_refresh_copy_mode_uses_the_copy_mode_cursor() {
+    let handler = RequestHandler::new();
+    let requester_pid = std::process::id();
+    let alpha = session_name("alpha");
+    let mut control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
+    let target = PaneTarget::new(alpha.clone(), 0);
+
+    // Park the *live* screen cursor at a distinctive position. If the delta ever
+    // resolved the plain-screen arm instead of the copy-mode snapshot arm, this is
+    // the position it would re-assert.
+    replace_transcript_contents(
+        &handler,
+        &target,
+        TerminalSize { cols: 40, rows: 6 },
+        b"copy-line-01\r\ncopy-line-02\r\ncopy-line-03\r\ncopy-line-04\r\ncopy-line-05\r\ncopy-line-06\r\ncopy-line-07\r\ncopy-line-08\x1b[6;33H",
+    )
+    .await;
+    assert!(matches!(
+        handler
+            .handle(Request::CopyMode(CopyModeRequest {
+                target: Some(target.clone()),
+                page_down: false,
+                exit_on_scroll: false,
+                hide_position: false,
+                mouse_drag_start: false,
+                cancel_mode: false,
+                scrollbar_scroll: false,
+                source: None,
+                page_up: true,
+            }))
+            .await,
+        Response::CopyMode(_)
+    ));
+    drain_attach_controls(&mut control_rx);
+
+    handler
+        .refresh_attached_client_status(requester_pid, &alpha)
+        .await
+        .expect("status refresh succeeds");
+
+    let frame = match control_rx.try_recv().expect("status refresh write") {
+        AttachControl::Write(bytes) => bytes,
+        other => panic!("expected a status write, got {other:?}"),
+    };
+    // Assert the copy-mode cursor's *actual* position, not merely that the live
+    // screen's is absent: a negative passes for any third wrong position, which is
+    // what let the copy-mode arm split slip through the v0.5.0 form of this test.
+    // Page-up keeps the column and moves to the top of the scrolled viewport, so
+    // this differs from the live screen's parked `6;33H` in exactly the row.
+    assert_cursor_assertion_overrides_restore(&frame, b"\x1b[1;33H\x1b[?25h");
+    assert!(
+        frame.ends_with(b"\x1b[1;33H\x1b[?25h"),
+        "copy-mode refresh must end on the copy-mode cursor: {:?}",
+        String::from_utf8_lossy(&frame)
+    );
+}
+
+#[tokio::test]
+async fn status_refresh_with_status_off_emits_nothing() {
+    let handler = RequestHandler::new();
+    let requester_pid = std::process::id();
+    let alpha = session_name("alpha");
+    let mut control_rx = create_quiet_attached_session(&handler, requester_pid, &alpha).await;
+
+    assert!(matches!(
+        handler
+            .handle(Request::SetOption(SetOptionRequest {
+                scope: ScopeSelector::Session(alpha.clone()),
+                option: OptionName::Status,
+                value: "off".to_owned(),
+                mode: SetOptionMode::Replace,
+            }))
+            .await,
+        Response::SetOption(_)
+    ));
+    replace_transcript_contents(
+        &handler,
+        &PaneTarget::new(alpha.clone(), 0),
+        TerminalSize { cols: 80, rows: 24 },
+        b"\x1b[5;9H",
+    )
+    .await;
+    drain_attach_controls(&mut control_rx);
+
+    handler
+        .refresh_attached_client_status(requester_pid, &alpha)
+        .await
+        .expect("status refresh succeeds");
+
+    // With no status bar there is no restore to override, so the cursor re-assert
+    // must not fire — otherwise every status-interval tick writes an unsolicited
+    // cursor reposition into a client that asked for nothing.
+    if let Ok(AttachControl::Write(frame)) = control_rx.try_recv() {
+        assert!(
+            frame.is_empty(),
+            "status-off refresh must not emit a cursor frame: {:?}",
+            String::from_utf8_lossy(&frame)
+        );
+    }
+}

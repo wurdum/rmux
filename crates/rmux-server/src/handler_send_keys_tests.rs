@@ -70,10 +70,8 @@ async fn handle_boxed(handler: &RequestHandler, request: Request) -> Response {
     Box::pin(handler.handle(request)).await
 }
 
-// bento patch: bento's vendored rmux defaults mode-keys to vi, so a case that
-// drives the emacs copy-mode key table has to select it explicitly rather than
-// inherit the default.
-#[allow(dead_code)]
+// bento patch: mode-keys defaults to vi (see rmux-core's options table), so a
+// case driving the emacs copy-mode table selects it explicitly.
 async fn set_emacs_mode_keys(handler: &RequestHandler, session: &rmux_proto::SessionName) {
     let response = handle_boxed(
         handler,

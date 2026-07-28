@@ -549,32 +549,106 @@ fn encode_key_meta_tab_keeps_upstream_extended_form() {
 }
 
 #[test]
+fn encode_key_meta_named_keys_take_the_legacy_form_under_modify_other_keys() {
+    // The accepted half of the predicate: a Meta-only named key whose VT10x
+    // sequence resolves. Without this the extended encoder renders the key's type
+    // sentinel, exactly as it did for M-BSpace.
+    for (name, expected) in [
+        ("M-F5", b"\x1b\x1b[15~".as_slice()),
+        ("M-PageUp", b"\x1b\x1b[5~".as_slice()),
+        ("M-DC", b"\x1b\x1b[3~".as_slice()),
+    ] {
+        assert_eq!(
+            encode_key(
+                mode::MODE_KEYS_EXTENDED_2,
+                ExtendedKeyFormat::Xterm,
+                parse_key(name)
+            )
+            .as_deref(),
+            Some(expected),
+            "{name} must take the legacy VT10x form, not the type sentinel"
+        );
+    }
+}
+
+#[test]
 fn encode_key_declines_legacy_for_modified_named_keys() {
-    // The bound that a review caught the first cut missing. Routing these into
-    // input_key_vt10x is destructive, not a fallback: it has no modified form
-    // for a named key, so a C- variant returns None (the keystroke is dropped
-    // outright) and an S- variant emits the sentinel's low bits as a live
-    // control byte — S-F12 would send 0x13, which is XOFF. They keep upstream's
-    // sentinel sequence instead: still wrong, but inert.
+    // Routing these into input_key_vt10x is destructive, not a fallback: it has
+    // no modified form for a named key, so a C- variant returns None (the
+    // keystroke is dropped outright) and an S- variant emits the sentinel's low
+    // bits as a live control byte — S-F12 sends 0x13, which is XOFF. Under
+    // modifyOtherKeys they keep upstream's sentinel sequence instead: still
+    // wrong, but inert.
     for name in ["S-F12", "S-DC", "S-PageDown", "C-DC", "C-Home"] {
+        let key = parse_key(name);
+
+        // State the property directly rather than pattern-matching the bytes: the
+        // encoding must be exactly what upstream's extended path produces. (Some of
+        // these — C-Home — resolve through `input_key_modified_cursor` to a
+        // well-formed `ESC[1;5H` rather than a sentinel, so a shape assertion would
+        // have to special-case them and would stop pinning the real property.)
+        assert_eq!(
+            encode_key(mode::MODE_KEYS_EXTENDED_2, ExtendedKeyFormat::Xterm, key).as_deref(),
+            super::input_key_extended(key, ExtendedKeyFormat::Xterm).as_deref(),
+            "{name} must keep upstream's extended encoding, not the legacy fallback"
+        );
+    }
+}
+
+#[test]
+fn encode_key_declines_legacy_for_modified_backspace() {
+    // BSpace is the one key admitted ahead of the control map, so it is the one
+    // that could smuggle a modifier past the bound above. The legacy form cannot
+    // spell Shift or Ctrl, and `input_key_vt10x` would drop the modifier and emit
+    // a bare erase byte — making C-BSpace indistinguishable from plain BSpace.
+    for name in ["C-BSpace", "S-BSpace"] {
         let encoded = encode_key(
             mode::MODE_KEYS_EXTENDED_2,
             ExtendedKeyFormat::Xterm,
             parse_key(name),
         );
-        let bytes = encoded
-            .as_deref()
-            .unwrap_or_else(|| panic!("{name} must still encode to something"));
 
-        assert!(
-            bytes.starts_with(b"\x1b["),
-            "{name} must keep an extended sequence, got {bytes:?}"
-        );
-        assert!(
-            bytes.len() > 2 && !bytes[1..].contains(&0x13),
-            "{name} must not emit a bare control byte such as XOFF: {bytes:?}"
+        assert_ne!(
+            encoded.as_deref(),
+            Some(b"\x7f".as_slice()),
+            "{name} must not collapse to a bare erase byte"
         );
     }
+}
+
+#[test]
+fn encode_key_declined_named_keys_hit_the_legacy_traps_at_pane_mode_0() {
+    // Pane mode 0 is upstream's behaviour, untouched by the bento patch — but the
+    // "inert" reassurance on `legacy_vt10x_spells_key` holds only under
+    // modifyOtherKeys, and pinning the hazard here is what keeps that scope
+    // honest. S-F12's sentinel low bits are 0x13, which is XOFF.
+    assert_eq!(
+        encode_key(0, ExtendedKeyFormat::Xterm, parse_key("S-F12")).as_deref(),
+        Some(b"\x13".as_slice()),
+        "pane mode 0 still emits the sentinel's low bits as a live control byte"
+    );
+    assert_eq!(
+        encode_key(0, ExtendedKeyFormat::Xterm, parse_key("C-DC")),
+        None,
+        "pane mode 0 still drops the keystroke outright"
+    );
+}
+
+#[test]
+fn encode_key_meta_keypad_keeps_upstream_mode1_encoding() {
+    // The legacy preference is scoped to modifyOtherKeys, so mode 1 still routes
+    // Meta keys through `input_key_vt10x(0, …)` — the hardcoded 0 strips
+    // KEYC_KEYPAD, and preempting it with the live pane mode would emit
+    // `ESC ESC O q` here instead.
+    assert_eq!(
+        encode_key(
+            mode::MODE_KEYS_EXTENDED | mode::MODE_KKEYPAD,
+            ExtendedKeyFormat::Xterm,
+            parse_key("M-KP1")
+        )
+        .as_deref(),
+        Some(b"\x1b1".as_slice())
+    );
 }
 
 #[test]

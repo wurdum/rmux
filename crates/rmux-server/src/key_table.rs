@@ -381,12 +381,9 @@ mod tests {
     }
 
     // bento patch: the daemon never passes raw bytes through — every attached
-    // keystroke is decoded to a KeyCode and re-encoded for the live pane. So the
-    // property bento depends on is the *round trip*, and it is the half that
-    // broke: both sides' one-directional tests stayed green while Alt+Backspace
-    // silently stopped deleting a word. This replaces the old
-    // `attached_escape_prefix_keeps_non_enter_control_partial` guard, which
-    // asserted these sequences stay Partial — false by design as of v0.9.1.
+    // keystroke is decoded to a KeyCode and re-encoded for the live pane, so the
+    // property bento depends on is the *round trip*. Either direction alone can
+    // stay green while Alt+Backspace silently stops deleting a word.
     #[test]
     fn attached_meta_control_keys_round_trip_through_the_pane_encoder() {
         use crate::input_keys::{encode_key, ExtendedKeyFormat};
